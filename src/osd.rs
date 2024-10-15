@@ -5,9 +5,9 @@ use crate::bindings::IMP_OSD_ShowRgn;
 use crate::bindings::IMP_OSD_UpdateRgnAttrData;
 use crate::bindings::EXIT_ERR;
 use crate::bindings::IMP_LOG_LEVEL_ERROR;
-use crate::bindings::OSD_REGION_HEIGHT;
-use crate::bindings::OSD_REGION_WIDTH;
 use crate::bindings::{IMPOSDRgnAttrData, IMPRgnHandle};
+use crate::common::OSD_REGION_HEIGHT;
+use crate::common::OSD_REGION_WIDTH;
 use core::alloc::Layout;
 use core::ptr;
 use core::ptr::copy_nonoverlapping;
@@ -20,7 +20,7 @@ const TAG: &str = "Sample-OSD";
 const OSD_LETTER_NUM: u32 = 20;
 
 fn osd_show(prHander: &mut [IMPRgnHandle]) -> i32 {
-    let mut ret: i32 = 0;
+    let mut ret: i32;
     let grpNum: i32 = 0;
     unsafe {
         ret = IMP_OSD_ShowRgn(prHander[0], grpNum, 1);
@@ -136,4 +136,8 @@ fn update_thread(p: *mut libc::c_void) {
             sleep(1);
         }
     }
+}
+
+fn sample_osd_start() {
+    let mut ret: i32 = 0;
 }

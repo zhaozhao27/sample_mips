@@ -8,6 +8,7 @@
 pub mod bindings {
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
+mod common;
 mod osd;
 use core::arch::asm;
 use core::panic::PanicInfo; //替换rust-std 中的panic
