@@ -1,0 +1,9 @@
+[target.mipsel-unknown-linux-gnu]
+    linker = "mipsel-linux-gnu-gcc"
+[target.mipsel-unknown-linux-uclibc]
+    rustflags = [
+        "-C", "link-args=-muclibc",
+        "-C", "link-arg=-msoft-float",
+    ]
+    linker = "/home/zhaozhao/WorkSpace/ISVP-T23-1.1.2-20240204/software/zh/Ingenic-SDK-T23-1.1.2-20240204-zh/resource/toolchain/gcc_540//mips-gcc540-glibc222-64bit-r3.3.0.smaller/bin/mips-linux-uclibc-gnu-gcc"
+    ar = "/home/zhaozhao/WorkSpace/ISVP-T23-1.1.2-20240204/software/zh/Ingenic-SDK-T23-1.1.2-20240204-zh/resource/toolchain/gcc_540//mips-gcc540-glibc222-64bit-r3.3.0.smaller/bin/mips-linux-gnu-ar"
