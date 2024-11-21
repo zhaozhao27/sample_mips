@@ -1,17 +1,13 @@
 [source.crates-io]
 #replace-with = 'rsproxy'
-
 [source.rsproxy]
 registry = "https://rsproxy.cn/crates.io-index"
-
 [registries.rsproxy]
 index = "https://rsproxy.cn/crates.io-index"
 
 
-
-[target.mipsel-unknown-linux-gnu]
-    linker = "/opt/mips-gcc540-glibc222-64bit-r3.3.0/bin/mips-linux-gnu-gcc"
-    ar = "/opt/mips-gcc540-glibc222-64bit-r3.3.0/bin/mips-linux-gnu-ar"
+[build]
+target = "mipsel-unknown-linux-uclibc"
 
 
 [target.mipsel-unknown-linux-uclibc]
@@ -25,3 +21,6 @@ index = "https://rsproxy.cn/crates.io-index"
     #linker = "mipsel-linux-gnu-gcc"
     linker = "/opt/mips-gcc540-glibc222-64bit-r3.3.0/bin/mips-linux-uclibc-gnu-gcc"
     ar = "/opt/mips-gcc540-glibc222-64bit-r3.3.0/bin/mips-linux-gnu-ar"
+    runner = "/opt/mips-gcc540-glibc222-64bit-r3.3.0/bin/mips-linux-gnu-strip"
+[target.mipsel-unknown-linux-uclibc.ld]
+    linker = "/opt/mips-gcc540-glibc222-64bit-r3.3.0/bin/mips-linux-uclibc-gnu-ld"

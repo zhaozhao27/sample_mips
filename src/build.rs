@@ -1,3 +1,4 @@
+#![allow(unused_imports)]
 use bindgen::{AliasVariation, EnumVariation, MacroTypeVariation, NonCopyUnionStyle};
 use std::env;
 use std::fs;
@@ -30,7 +31,7 @@ fn main() {
         // mipsel-gcc-9 debug
         // println!("cargo:rustc-link-arg=-Wl,-rpath,/home/zhaozhao/WorkSpace/ISVP-T23-1.1.2-20240204/software/zh/Ingenic-SDK-T23-1.1.2-20240204-zh/resource/toolchain/gcc_540/mips-gcc540-glibc222-64bit-r3.3.0.smaller/mips-linux-gnu/libc/uclibc/soft-float/lib/");
 
-        let include_dir = "./include";
+        let include_dir = "../include";
         let mut builder = bindgen::Builder::default();
         for entry in WalkDir::new(include_dir).into_iter().filter_map(Result::ok) {
             if entry.path().is_file() && entry.path().extension().map(|s| s == "h").unwrap_or(false)
@@ -66,24 +67,24 @@ fn main() {
             .generate()
             .expect("Unable to generate bindings");
 
-        let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
+        let bindings_path = PathBuf::from("bindings.rs");
+        //let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
         bindings
-            .write_to_file(out_path.join("bindings.rs")) // 生成的文件名
+            .write_to_file(&bindings_path) // 生成的文件名
             .expect("Couldn't write bindings!");
 
-        let bindings_file_path = out_path.join("bindings.rs");
         // 读取并修改生成的 bindings 文件
         let mut bindings_content =
-            std::fs::read_to_string(&bindings_file_path).expect("Couldn't read bindings file");
+            std::fs::read_to_string(&bindings_path).expect("Couldn't read bindings file");
 
         // 在文件顶部添加禁用警告的注释
         bindings_content.insert_str(0, "#[allow(non_upper_case_globals)]\n");
 
         // 将修改后的内容写回文件
-        std::fs::write(&bindings_file_path, bindings_content)
+        std::fs::write(&bindings_path, bindings_content)
             .expect("Couldn't write updated bindings file!");
     } else if target.contains("mipsel-unknown-linux-gnu") {
-        println!("cargo:rustc-link-search=native=./lib/glibc");
+        println!("cargo:rustc-link-search=native=../lib/glibc");
         println!("cargo:rustc-link-search=native=/opt/mips-gcc540-glibc222-64bit-r3.3.0/mips-linux-gnu/libc/lib/");
 
         //println!("cargo:rustc-link-search=native=/home/zhaozhao/WorkSpace/ISVP-T23-1.1.2-20240204/software/zh/Ingenic-SDK-T23-1.1.2-20240204-zh/resource/toolchain/gcc_540/mips-gcc540-glibc222-64bit-r3.3.0.smaller/mips-linux-gnu/libc/lib/");
@@ -109,7 +110,7 @@ fn main() {
         // mipsel-gcc-9 debug
         // println!("cargo:rustc-link-arg=-Wl,-rpath,/home/zhaozhao/WorkSpace/ISVP-T23-1.1.2-20240204/software/zh/Ingenic-SDK-T23-1.1.2-20240204-zh/resource/toolchain/gcc_540/mips-gcc540-glibc222-64bit-r3.3.0.smaller/mips-linux-gnu/libc/uclibc/soft-float/lib/");
 
-        let include_dir = "./include";
+        let include_dir = "../include";
         let mut builder = bindgen::Builder::default();
         for entry in WalkDir::new(include_dir).into_iter().filter_map(Result::ok) {
             if entry.path().is_file() && entry.path().extension().map(|s| s == "h").unwrap_or(false)

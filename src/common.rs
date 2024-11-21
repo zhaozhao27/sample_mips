@@ -36,17 +36,29 @@ use crate::{
 const SENSOR_FRAME_RATE_NUM: i32 = 25;
 const SENSOR_FRAME_RATE_DEN: i32 = 1;
 
+use alloc::{slice, string::ToString};
 use core::{
+    borrow::Borrow,
     error,
     ffi::{c_void, CStr},
-    fmt::{self, Binary, Write},
+    fmt::{self, Binary, Write as bWrite},
     mem::{self, MaybeUninit},
-    ptr, time,
+    ptr,
+    result::Result,
+    time::{self, Duration},
 };
-use libc::{
-    self, c_int, close, fd_set, free, malloc, open, printf, pthread_create, pthread_join,
-    pthread_t, select, sprintf, timeval, write, FD_ISSET, FD_SET, FD_ZERO, O_CREAT, O_RDWR,
-    O_TRUNC, SECCOMP_RET_ERRNO,
+
+use nix::sys::{
+    select::{select, FdSet},
+    time::TimeVal,
+};
+use nix::unistd::*;
+use std::os::unix::io::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+use std::{
+    fs::{File, OpenOptions},
+    io::{self, Write},
+    os::{fd, unix::fs::OpenOptionsExt},
+    thread,
 };
 
 #[derive(Debug, Default)]
@@ -470,7 +482,7 @@ struct ByteArrayWriter<'a> {
     position: usize,
 }
 
-impl<'a> Write for ByteArrayWriter<'a> {
+impl<'a> bWrite for ByteArrayWriter<'a> {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         let bytes = s.as_bytes();
         if self.position + bytes.len() > self.buffer.len() {
@@ -483,8 +495,8 @@ impl<'a> Write for ByteArrayWriter<'a> {
 }
 
 extern "C" {
-    pub fn IMP_Encoder_SetPoolSize(size: c_int) -> c_int;
-    pub fn IMP_OSD_SetPoolSize(size: c_int) -> c_int;
+    pub fn IMP_Encoder_SetPoolSize(size: libc::c_int) -> libc::c_int;
+    pub fn IMP_OSD_SetPoolSize(size: libc::c_int) -> libc::c_int;
 }
 use core::{borrow::BorrowMut, ptr::copy_nonoverlapping};
 
@@ -529,7 +541,7 @@ pub fn sample_system_init(sensor_info: *mut IMPSensorInfo) -> Result<i32, i32> {
         sensor_info.__anon1.i2c.addr = SENSOR_CONFIG.i2c_addr as _;
         sensor_info.__anon1.i2c.i2c_adapter_id = SENSOR_CONFIG.i2c_adapter_id as _;
 
-        printf(b"sample_system_init() start \n".as_ptr() as *const _);
+        imp_log_info!(&TAG, "sample_system_init() start ");
 
         ret = IMP_ISP_Open();
         ret_verify!(ret, "failed to open ISP\n");
@@ -555,7 +567,7 @@ pub fn sample_system_init(sensor_info: *mut IMPSensorInfo) -> Result<i32, i32> {
         ret = IMP_ISP_Tuning_SetISPRunningMode(IMPISP_RUNNING_MODE_DAY);
         ret_verify!(ret, "failed to set running mode\n");
 
-        imp_log_info!("ImpSystemInit success");
+        imp_log_info!(TAG, "ImpSystemInit success");
     }
 
     Ok(0)
@@ -564,7 +576,7 @@ pub fn sample_system_init(sensor_info: *mut IMPSensorInfo) -> Result<i32, i32> {
 pub fn sample_system_exit(sensor_info: *mut IMPSensorInfo) -> Result<(), i32> {
     let mut ret: i32 = 0;
     unsafe {
-        imp_log_info!("sample_system_exit start");
+        imp_log_info!(&TAG, "sample_system_exit start");
         IMP_System_Exit();
 
         ret = IMP_ISP_DisableSensor();
@@ -577,10 +589,10 @@ pub fn sample_system_exit(sensor_info: *mut IMPSensorInfo) -> Result<(), i32> {
         ret_verify!(ret, "IMP_ISP_DisableTuning failed\n");
 
         if IMP_ISP_Close() != 0 {
-            printf(b"failed to open ISP\n".as_ptr() as *mut _);
+            imp_log_err!(&TAG, "failed to open ISP");
             return Err(-1);
         }
-        imp_log_info!("sample_system_exit success !");
+        imp_log_info!(&TAG, "sample_system_exit success !");
     }
     Ok(())
 }
@@ -840,11 +852,11 @@ pub fn sample_encoder_init() -> Result<(), i32> {
                 if DIRECT_SWICTH == 1 && chn_num == 0 {
                     channel_attr.bEnableIvdc = true;
                 }
-
-                printf(
-                    "IMP_Encoder_CreateChn[%d] CHN.enable = %d\n\0".as_ptr() as *const _,
+                imp_log_info!(
+                    &TAG,
+                    "IMP_Encoder_CreateChn[{}] CHN.enable = {}",
                     i,
-                    if CHN[i].enable { 1 } else { 0 },
+                    CHN[i].enable
                 );
 
                 let ret = IMP_Encoder_CreateChn(chn_num, &channel_attr);
@@ -885,42 +897,30 @@ pub fn sample_encoder_exit() -> Result<(), i32> {
     Ok(())
 }
 
-pub fn sample_osd_init(grp_num: i32) -> Result<*mut IMPRgnHandle, i32> {
-    let mut pr_hander: *mut IMPRgnHandle = ptr::null_mut();
-    #[cfg(true)]
-    {
-        pr_hander =
-            unsafe { malloc(4 * core::mem::size_of::<IMPRgnHandle>()) as *mut IMPRgnHandle };
-        if pr_hander.is_null() {
-            imp_log_err!("malloc error");
-            return Err(-1);
-        }
-    }
-    //let mut pr_hander: [IMPRgnHandle; 4] = Default::default();
+pub fn sample_osd_init(grp_num: i32) -> Result<Vec<IMPRgnHandle>, i32> {
+    let mut ret: i32;
+    let mut handles: Vec<IMPRgnHandle> = Vec::with_capacity(4);
 
     let mut r_hander_font = unsafe { IMP_OSD_CreateRgn(ptr::null_mut()) };
     ret_verify!(r_hander_font, "IMP_OSD_CreateRgn TimeStamp error!");
+    handles.push(r_hander_font);
 
     let mut r_hander_logo = unsafe { IMP_OSD_CreateRgn(ptr::null_mut()) };
     ret_verify!(r_hander_font, "IMP_OSD_CreateRgn Logo error!");
+    handles.push(r_hander_logo);
 
     let mut r_hander_cover = unsafe { IMP_OSD_CreateRgn(ptr::null_mut()) };
     ret_verify!(r_hander_font, "IMP_OSD_CreateRgn Cover error!");
+    handles.push(r_hander_cover);
 
     let mut r_hander_rect = unsafe { IMP_OSD_CreateRgn(ptr::null_mut()) };
     ret_verify!(r_hander_font, "IMP_OSD_CreateRgn Rect error!");
+    handles.push(r_hander_rect);
 
-    let mut ret = unsafe { IMP_OSD_RegisterRgn(r_hander_font, grp_num, ptr::null_mut()) };
-    ret_verify!(ret, "IVS IMP_OSD_RegisterRgn failed");
-
-    ret = unsafe { IMP_OSD_RegisterRgn(r_hander_logo, grp_num, ptr::null_mut()) };
-    ret_verify!(ret, "IVS IMP_OSD_RegisterRgn failed");
-
-    ret = unsafe { IMP_OSD_RegisterRgn(r_hander_cover, grp_num, ptr::null_mut()) };
-    ret_verify!(ret, "IVS IMP_OSD_RegisterRgn failed");
-
-    ret = unsafe { IMP_OSD_RegisterRgn(r_hander_rect, grp_num, ptr::null_mut()) };
-    ret_verify!(ret, "IVS IMP_OSD_RegisterRgn failed");
+    for &r_hander in &handles {
+        let ret = unsafe { IMP_OSD_RegisterRgn(r_hander, grp_num, ptr::null_mut()) };
+        ret_verify!(ret, "IVS IMP_OSD_RegisterRgn failed");
+    }
 
     // 设置 Region 属性
     let mut r_attr_font = IMPOSDRgnAttr::default();
@@ -1046,232 +1046,197 @@ pub fn sample_osd_init(grp_num: i32) -> Result<*mut IMPRgnHandle, i32> {
     ret = unsafe { IMP_OSD_Start(grp_num) };
     ret_verify!(ret, "IMP_OSD_Start failed");
 
-    // pr_hander[0] = r_hander_font;
-    // pr_hander[1] = r_hander_logo;
-    // pr_hander[2] = r_hander_cover;
-    // pr_hander[3] = r_hander_rect;
-    unsafe {
-        (*pr_hander.offset(0)) = r_hander_font;
-        (*pr_hander.offset(1)) = r_hander_logo;
-        (*pr_hander.offset(2)) = r_hander_cover;
-        (*pr_hander.offset(3)) = r_hander_rect;
-    }
-    imp_log_info!("sample osd init success !");
-    Ok(pr_hander)
+    imp_log_info!(&TAG, "sample osd init success !");
+    // let raw_ptr = handles.as_mut_ptr();
+    // mem::forget(handles);
+    Ok(handles)
 }
 
-pub fn sample_osd_exit(pr_hander: *mut IMPRgnHandle, grp_num: i32) -> Result<(), i32> {
+pub fn sample_osd_exit(pr_handers: Vec<IMPRgnHandle>, grp_num: i32) -> Result<(), i32> {
     let mut ret: i32;
     unsafe {
-        ret = IMP_OSD_ShowRgn(*pr_hander.offset(0), grp_num, 0);
+        ret = IMP_OSD_ShowRgn(pr_handers[0], grp_num, 0);
         if ret < 0 {
-            imp_log_err!("IMP_OSD_ShowRgn close timeStamp error\n");
+            imp_log_err!(&TAG, "IMP_OSD_ShowRgn close timeStamp error\n");
         }
 
-        ret = IMP_OSD_ShowRgn(*pr_hander.offset(1), grp_num, 0);
+        ret = IMP_OSD_ShowRgn(pr_handers[1], grp_num, 0);
         if ret < 0 {
-            imp_log_err!("IMP_OSD_ShowRgn close Logo error\n");
+            imp_log_err!(&TAG, "IMP_OSD_ShowRgn close Logo error\n");
         }
 
-        ret = IMP_OSD_ShowRgn(*pr_hander.offset(2), grp_num, 0);
+        ret = IMP_OSD_ShowRgn(pr_handers[2], grp_num, 0);
         if ret < 0 {
-            imp_log_err!("IMP_OSD_ShowRgn close cover error\n");
+            imp_log_err!(&TAG, "IMP_OSD_ShowRgn close cover error\n");
         }
 
-        ret = IMP_OSD_ShowRgn(*pr_hander.offset(3), grp_num, 0);
+        ret = IMP_OSD_ShowRgn(pr_handers[3], grp_num, 0);
         if ret < 0 {
-            imp_log_err!("IMP_OSD_ShowRgn close Rect error\n");
+            imp_log_err!(&TAG, "IMP_OSD_ShowRgn close Rect error\n");
         }
 
         // 注销各个 Region
-        ret = IMP_OSD_UnRegisterRgn(*pr_hander.offset(0), grp_num);
+        ret = IMP_OSD_UnRegisterRgn(pr_handers[0], grp_num);
         if ret < 0 {
-            imp_log_err!("IMP_OSD_UnRegisterRgn timeStamp error\n");
+            imp_log_err!(&TAG, "IMP_OSD_UnRegisterRgn timeStamp error\n");
         }
 
-        ret = IMP_OSD_UnRegisterRgn(*pr_hander.offset(1), grp_num);
+        ret = IMP_OSD_UnRegisterRgn(pr_handers[1], grp_num);
         if ret < 0 {
-            imp_log_err!("IMP_OSD_UnRegisterRgn logo error\n");
+            imp_log_err!(&TAG, "IMP_OSD_UnRegisterRgn logo error\n");
         }
 
-        ret = IMP_OSD_UnRegisterRgn(*pr_hander.offset(2), grp_num);
+        ret = IMP_OSD_UnRegisterRgn(pr_handers[2], grp_num);
         if ret < 0 {
-            imp_log_err!("IMP_OSD_UnRegisterRgn Cover error\n");
+            imp_log_err!(&TAG, "IMP_OSD_UnRegisterRgn Cover error\n");
         }
 
-        ret = IMP_OSD_UnRegisterRgn(*pr_hander.offset(3), grp_num);
+        ret = IMP_OSD_UnRegisterRgn(pr_handers[3], grp_num);
         if ret < 0 {
-            imp_log_err!("IMP_OSD_UnRegisterRgn Rect error\n");
+            imp_log_err!(&TAG, "IMP_OSD_UnRegisterRgn Rect error\n");
         }
 
-        IMP_OSD_DestroyRgn(*pr_hander.offset(0));
-        IMP_OSD_DestroyRgn(*pr_hander.offset(1));
-        IMP_OSD_DestroyRgn(*pr_hander.offset(2));
-        IMP_OSD_DestroyRgn(*pr_hander.offset(3));
+        IMP_OSD_DestroyRgn(pr_handers[0]);
+        IMP_OSD_DestroyRgn(pr_handers[1]);
+        IMP_OSD_DestroyRgn(pr_handers[2]);
+        IMP_OSD_DestroyRgn(pr_handers[3]);
 
         ret = IMP_OSD_DestroyGroup(grp_num);
         ret_verify!(ret, "IMP_OSD_DestroyGroup(0) error\n");
 
-        free(pr_hander as *mut c_void);
+        //nix::libc::free(pr_handers as *mut c_void);
     }
 
     Ok(())
 }
 
-pub fn save_stream(fd: c_int, stream: &IMPEncoderStream) -> Result<(), i32> {
+pub fn save_stream(file: &mut File, stream: &IMPEncoderStream) -> io::Result<()> {
     let nr_pack = stream.packCount;
 
     for i in 0..nr_pack {
         let pack_ptr = unsafe { stream.pack.offset(i as isize) };
         let pack = unsafe { *pack_ptr };
 
-        let ret = unsafe { write(fd, pack.virAddr as *const _, pack.length as usize) };
+        //let ret = unsafe { write(fd, pack.virAddr as *const _, pack.length as usize) };
+        let data =
+            unsafe { slice::from_raw_parts(pack.virAddr as *const u8, pack.length as usize) };
 
-        if ret != pack.length as isize {
-            imp_log_err!("stream write failed");
-            return Err(-1);
+        match (*file).write_all(data) {
+            Ok(_) => {}
+            Err(e) => {
+                imp_log_err!(&TAG, "stream write failed: {}", e);
+                return Err(e);
+            }
         }
     }
     Ok(())
 }
 
 pub fn save_stream_by_name(
-    stream_prefix: &CStr,
+    stream_prefix: &str,
     idx: i32,
     stream: &IMPEncoderStream,
-) -> Result<(), i32> {
+) -> io::Result<()> {
     let stream_fd: i32;
     let mut stream_path = [0u8; 128];
     let mut ret: isize;
 
-    //let prefix = unsafe { CStr::from_ptr(stream_prefix as *const i8) };
-    //let stream_prefix_str = prefix.to_str().unwrap_or_default();
-    let mut writer = ByteArrayWriter {
-        buffer: &mut stream_path,
-        position: 0,
-    };
+    let stream_path = format!("{}_{}", stream_prefix, idx);
 
-    write!(writer, "{}_{}", stream_prefix.to_str().unwrap(), idx).unwrap();
+    imp_log_info!(&TAG, "Openning Stream file");
 
-    imp_log_info!("Openning Stream file ");
-
-    // 打开文件
-    stream_fd = unsafe {
-        open(
-            stream_path.as_ptr() as *const i8,
-            O_RDWR | O_CREAT | O_TRUNC,
-            0o777,
-        )
-    };
-
-    if stream_fd < 0 {
-        imp_log_err!("Open Stream file failed");
-        return Err(-1);
-    }
-
-    imp_log_info!("OK");
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o777)
+        .open(&stream_path)
+        .map_err(|e| {
+            imp_log_err!(&TAG, "Failed to open stream file: {}", e);
+            e
+        })?;
 
     //let stream = stream;
     let nr_pack = stream.packCount;
 
     for i in 0..nr_pack {
         let pack = unsafe { &*stream.pack.offset(i as isize) };
-        ret = unsafe { write(stream_fd, pack.virAddr as *const _, pack.length as usize) };
 
-        if ret != pack.length as isize {
-            unsafe {
-                close(stream_fd);
-            }
-            imp_log_err!("stream write err - common:1192 !");
-            return Err(-1);
+        let data =
+            unsafe { slice::from_raw_parts(pack.virAddr as *const u8, pack.length as usize) };
+        if let Err(e) = file.write_all(data) {
+            imp_log_err!(&TAG, "Stream write error: {}", e);
+            return Err(e);
         }
     }
-
-    unsafe { close(stream_fd) };
     Ok(())
 }
-
-#[no_mangle]
-extern "C" fn get_video_stream(args: *mut c_void) -> *mut c_void {
-    let val_ptr = args as *mut i32;
-    let val = unsafe {
-        assert!(
-            !val_ptr.is_null(),
-            "argv passed to get_video_stream! is a null pointer"
-        );
-        *val_ptr
-    };
+pub extern "C" fn libc_get_video_stream(val: *mut c_void) -> *mut c_void {
+    let mut arg: i32 = unsafe { *(val as *mut i32) };
+    get_video_stream(&mut arg).unwrap();
+    return ptr::null_mut();
+}
+fn get_video_stream(arg: &mut i32) -> Result<(), i32> {
+    let val = *arg;
     let chn_num = val & 0xffff;
     let payload_type = (val >> 16) & 0xffff;
     let stream_fd: i32;
     let total_save_cnt: i32;
-    let mut stream_path = [0i8; 64];
-    unsafe {
-        printf("chn_num = %d\n\0".as_ptr() as *const _, chn_num);
-    }
 
     let mut ret = unsafe { IMP_Encoder_StartRecvPic(chn_num) };
-
-    if ret < 0 {
-        imp_log_err!("IMP_Encoder_StartRecvPic(0) failed! - common:1218\n");
-        //return ptr::null_mut();
-    }
+    ret_verify!(ret, "IMP_Encoder_StartRecvPic(0) failed! - common:1218");
 
     let stream_suffix: &str = match payload_type {
-        x if x == PT_H264 as i32 => "h264\0",
-        x if x == PT_H265 as i32 => "h265\0",
-        x if x == PT_JPEG as i32 => "jpeg\0",
+        x if x == PT_H264 as i32 => "h264",
+        x if x == PT_H265 as i32 => "h265",
+        x if x == PT_JPEG as i32 => "jpeg",
         _ => "none\0",
     };
 
-    unsafe { printf("suffix = %s\n\0".as_ptr() as *const _, stream_suffix) };
-    unsafe {
-        sprintf(
-            stream_path.as_mut_ptr(),
-            "%s/stream-%d.%s\0".as_ptr() as *const _,
-            STREAM_FILE_PATH_PREFIX,
-            chn_num,
-            stream_suffix,
-        );
-        printf("chn_num check = %d\n\0".as_ptr() as *const _, chn_num);
-    }
-    unsafe {
-        printf(
-            "file path = %s\n\0".as_ptr() as *const _,
-            stream_path.as_ptr(),
-        )
-    };
+    let stream_path = format!(
+        "{}/stream-{}.{}",
+        STREAM_FILE_PATH_PREFIX, chn_num, stream_suffix
+    );
+    println!("file path = {}", stream_path);
 
-    if payload_type == PT_JPEG as i32 {
-        total_save_cnt = if NR_FRAMES_TO_SAVE / 50 > 0 {
+    let (mut stream_fd, total_save_cnt) = if payload_type == PT_JPEG as i32 {
+        let total_save_cnt = if NR_FRAMES_TO_SAVE / 50 > 0 {
             NR_FRAMES_TO_SAVE / 50
         } else {
             1
         };
-        stream_fd = 0;
+        (None, total_save_cnt)
     } else {
-        stream_fd = unsafe { open(stream_path.as_ptr(), O_RDWR | O_CREAT | O_TRUNC, 0777) };
-        if stream_fd < 0 {
-            imp_log_err!("open stream file failed \n");
-            return ptr::null_mut();
+        // 打开文件
+        match OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0777)
+            .open(&stream_path)
+        {
+            Ok(file) => {
+                println!("open stream file ok");
+                (Some(file), NR_FRAMES_TO_SAVE)
+            }
+            Err(e) => {
+                eprintln!("Failed to open stream file: {}", e);
+                return Err(-1);
+            }
         }
-        imp_log_dbg!("open steamfile ok");
-        total_save_cnt = NR_FRAMES_TO_SAVE
-    }
+    };
 
     for i in 0..total_save_cnt {
         ret = unsafe { IMP_Encoder_PollingStream(chn_num, 1000) };
         if ret < 0 {
-            imp_log_err!("IMP_Encoder_PollingStream({}) timeout", chn_num);
+            imp_log_err!(&TAG, "IMP_Encoder_PollingStream({}) timeout", chn_num);
             continue;
         }
 
         let mut stream: IMPEncoderStream = unsafe { mem::zeroed() };
         ret = unsafe { IMP_Encoder_GetStream(chn_num, &mut stream as *mut _, true) };
-        if ret < 0 {
-            imp_log_err!("IMP_Encoder_GetStream({}) failed", chn_num);
-            return ptr::null_mut();
-        }
+
+        ret_verify!(ret, "IMP_Encoder_GetStream({}) failed", chn_num);
 
         #[cfg(feature = "SHOW_FRM_BITRATE")]
         {
@@ -1300,34 +1265,29 @@ extern "C" fn get_video_stream(args: *mut c_void) -> *mut c_void {
         }
 
         if payload_type == PT_JPEG as i32 {
-            if let Err(ret) =
-                save_stream_by_name(unsafe { CStr::from_ptr(stream_path.as_ptr()) }, i, &stream)
-            {
-                return ret as *mut _;
+            if let Err(_) = save_stream_by_name(&stream_path, i, &stream) {
+                return Err(-1);
             }
-        } else {
-            if let Err(ret) = save_stream(stream_fd, &stream) {
-                unsafe { close(stream_fd) };
-                return ret as *mut _;
+        } else if let Some(ref mut fd) = stream_fd {
+            if let Err(e) = save_stream(fd, &stream) {
+                imp_log_err!(&TAG, "{}", e);
+                return Err(-1);
             }
         }
 
         unsafe { IMP_Encoder_ReleaseStream(chn_num, &mut stream) };
     }
 
-    unsafe { close(stream_fd) };
-
     ret = unsafe { IMP_Encoder_StopRecvPic(chn_num) };
-    if ret < 0 {
-        imp_log_err!("IMP_Encoder_StopRecvPic({}) failed", chn_num);
-        return ptr::null_mut();
-    }
 
-    ptr::null_mut()
+    ret_verify!(ret, "IMP_Encoder_StopRecvPic({}) failed", chn_num);
+
+    Ok(())
 }
 
 pub fn sample_get_video_stream() -> Result<(), i32> {
-    let mut tid: [pthread_t; FS_CHN_NUM] = Default::default();
+    let mut handles = Vec::new();
+    let mut tid: [libc::pthread_t; FS_CHN_NUM] = [0; FS_CHN_NUM];
     let mut ret: i32;
     for i in 0..FS_CHN_NUM {
         if unsafe { CHN[i].enable } {
@@ -1337,61 +1297,62 @@ pub fn sample_get_video_stream() -> Result<(), i32> {
                 (unsafe { CHN[i].payload_type as i32 } << 16) | unsafe { CHN[i].index }
             };
 
-            ret = unsafe {
-                pthread_create(
-                    &mut tid[i],
-                    ptr::null(),
-                    get_video_stream,
-                    &mut arg as *mut _ as *mut c_void,
-                )
-            };
-
-            if ret < 0 {
-                imp_log_err!("get_video_stream failed, program will stop !");
-                return Err(-1);
+            #[cfg(feature = "glibc")]
+            {
+                let handle = thread::spawn(move || get_video_stream(&mut arg));
             }
-        }
-    }
-
-    for i in 0..FS_CHN_NUM {
-        if unsafe { CHN[i].enable } {
-            let mut ret_val: *mut c_void = ptr::null_mut();
-            unsafe {
-                ret = pthread_join(tid[i], &mut ret_val);
-            }
-            if !ret_val.is_null() {
+            #[cfg(not(feature = "glibc"))]
+            {
                 unsafe {
-                    let ret = *(ret_val as *mut i32);
-
-                    printf("Received ret value: %d\n".as_ptr() as *const _, ret);
+                    let handle = libc::pthread_create(
+                        &mut tid[i],
+                        ptr::null(),
+                        libc_get_video_stream,
+                        &mut arg as *mut i32 as *mut libc::c_void,
+                    );
                 }
+            }
+            unsafe {
+                let test =
+                    thread::Builder::new().spawn_unchecked(move || get_video_stream(&mut arg));
+            }
 
-                unsafe { free(ret_val) };
-            }
-            if ret < 0 {
-                return Err(-1);
-            }
+            handles.push(tid[i]);
         }
     }
+
+    for handle in handles {
+        unsafe {
+            libc::pthread_join(handle, ptr::null_mut());
+        }
+    }
+    // for handle in handles {
+    //     match handle.join() {
+    //         Ok(_) => {}
+    //         Err(_) => {
+    //             imp_log_err!(&TAG, "get_video_stream failed, program will stop !");
+    //             return Err(-1);
+    //         }
+    //     }
+    // }
 
     Ok(())
 }
 
 pub fn sample_get_video_stream_byfd() -> Result<(), i32> {
-    let mut stream_fd: [i32; FS_CHN_NUM] = [0; FS_CHN_NUM];
-    let mut venc_fd: [i32; FS_CHN_NUM] = [0; FS_CHN_NUM];
+    let mut stream_fd: [Option<File>; FS_CHN_NUM] = Default::default();
+    let mut venc_fd: [RawFd; FS_CHN_NUM] = [0; FS_CHN_NUM];
     let mut max_venc_fd = 0;
     let mut total_save_stream_cnt: [i32; FS_CHN_NUM] = [0; FS_CHN_NUM];
     let mut save_stream_cnt: [i32; FS_CHN_NUM] = [0; FS_CHN_NUM];
-    let mut stream_path: [[i8; 128]; FS_CHN_NUM] = [[0; 128]; FS_CHN_NUM];
-    let mut read_fds: fd_set = unsafe { core::mem::zeroed() };
+    let mut stream_path: Vec<String> = vec![String::new(); FS_CHN_NUM];
+    let mut read_fds = FdSet::new();
     let mut ret: i32;
 
     // let mut stream_path: [MaybeUninit<[u8; 128]>; FS_CHN_NUM] = MaybeUninit::uninit_array();
-
+    // let venc_fd: Vec<i32> = vec![]; // 假设你有一些文件描述符
+    // let max_venc_fd = venc_fd.iter().map(|&fd| fd).max().unwrap_or(0);
     for i in 0..FS_CHN_NUM {
-        stream_fd[i] = -1;
-        venc_fd[i] = -1;
         save_stream_cnt[i] = 0;
 
         if unsafe { CHN[i].enable } {
@@ -1409,33 +1370,29 @@ pub fn sample_get_video_stream_byfd() -> Result<(), i32> {
             }
 
             let stream_suffix = match unsafe { CHN[i].payload_type } {
-                PT_H264 => "h264\0",
-                PT_H265 => "h265\0",
-                PT_JPEG => "jpeg\0",
+                PT_H264 => "h264",
+                PT_H265 => "h265",
+                PT_JPEG => "jpeg",
             };
 
-            let prefix = STREAM_FILE_PATH_PREFIX.as_bytes();
-            let mut writer = ByteArrayWriter {
-                buffer: unsafe { &mut *(stream_path[i].as_mut_ptr() as *mut [u8; 128]) },
-                position: 0,
-            };
-            write!(
-                &mut writer,
+            stream_path[i] = format!(
                 "{}/stream-{}.{}",
                 STREAM_FILE_PATH_PREFIX, chn_num, stream_suffix
-            )
-            .unwrap();
+            );
 
             if unsafe { CHN[i].payload_type } != PT_JPEG {
-                stream_fd[i] = unsafe {
-                    open(
-                        stream_path[i].as_ptr() as *const i8,
-                        O_RDWR | O_CREAT | O_TRUNC,
-                        0o777,
-                    )
-                };
-
-                ret_verify!(stream_fd[i], "open stream file error!!!\n");
+                stream_fd[i] = Some(
+                    OpenOptions::new()
+                        .write(true)
+                        .create(true)
+                        .truncate(true)
+                        .mode(0o777)
+                        .open(&stream_path[i])
+                        .map_err(|e| {
+                            imp_log_err!(&TAG, "open stream file error: {}", e);
+                            -1
+                        })?,
+                );
             }
 
             venc_fd[i] = unsafe { IMP_Encoder_GetFd(chn_num) };
@@ -1445,53 +1402,54 @@ pub fn sample_get_video_stream_byfd() -> Result<(), i32> {
                 max_venc_fd = venc_fd[i];
             }
 
-            let ret = unsafe { IMP_Encoder_StartRecvPic(chn_num) };
+            ret = unsafe { IMP_Encoder_StartRecvPic(chn_num) };
             ret_verify!(ret, "IMP_Encoder_StartRecvPic({}) failed\n", chn_num);
         }
     }
 
     loop {
-        let mut break_flag = true;
-        for i in 0..FS_CHN_NUM {
-            break_flag &= save_stream_cnt[i] >= total_save_stream_cnt[i];
-        }
-        if break_flag {
+        if save_stream_cnt
+            .iter()
+            .zip(total_save_stream_cnt.iter())
+            .all(|(saved, total)| *saved >= *total)
+        {
             break; // 保存帧数足够
         }
-
-        unsafe {
-            FD_ZERO(&mut read_fds);
-        }
+        // let mut break_flag = true;
+        // for i in 0..FS_CHN_NUM {
+        //     break_flag &= save_stream_cnt[i] >= total_save_stream_cnt[i];
+        // }
+        // if break_flag {
+        //     break; // 保存帧数足够
+        // }
+        read_fds.clear();
         for i in 0..FS_CHN_NUM {
             if unsafe { CHN[i].enable } && save_stream_cnt[i] < total_save_stream_cnt[i] {
-                unsafe {
-                    FD_SET(venc_fd[i], &mut read_fds);
-                }
+                //let mut raw_fd: RawFd = venc_fd[i].as_raw_fd();
+                //raw_fd
+                read_fds.insert(unsafe { BorrowedFd::borrow_raw(venc_fd[i]) });
             }
         }
 
-        let mut select_timeout = timeval {
-            tv_sec: 2,
-            tv_usec: 0,
-        };
+        let mut select_timeout = TimeVal::new(2, 0);
 
-        ret = unsafe {
-            select(
-                max_venc_fd + 1,
-                &mut read_fds,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                &mut select_timeout,
-            )
-        };
+        ret = select(
+            max_venc_fd + 1,
+            &mut read_fds,
+            None,
+            None,
+            Some(&mut select_timeout),
+        )
+        .map_err(|e| e as i32)?;
         if ret < 0 {
-            imp_log_err!("select failed");
+            imp_log_err!(&TAG, "select failed");
             return Err(ret);
         } else if ret == 0 {
             continue;
         } else {
             for i in 0..FS_CHN_NUM {
-                if unsafe { CHN[i].enable && FD_ISSET(venc_fd[i], &read_fds) } {
+                if unsafe { CHN[i].enable && read_fds.contains(BorrowedFd::borrow_raw(venc_fd[i])) }
+                {
                     let mut stream: IMPEncoderStream = Default::default();
 
                     let chn_num = if unsafe { CHN[i].payload_type } == PT_JPEG {
@@ -1505,18 +1463,17 @@ pub fn sample_get_video_stream_byfd() -> Result<(), i32> {
                     ret_verify!(ret, "IMP_Encoder_GetStream({}) failed", chn_num);
 
                     if unsafe { CHN[i].payload_type } == PT_JPEG {
-                        if let Err(ret) = save_stream_by_name(
-                            unsafe { CStr::from_ptr(stream_path[i].as_ptr()) },
-                            save_stream_cnt[i],
-                            &stream,
-                        ) {
-                            return Err(ret);
-                        };
-                    } else {
-                        if let Err(ret) = save_stream(stream_fd[i], &stream) {
-                            unsafe { close(stream_fd[i]) };
+                        if let Err(ret) =
+                            save_stream_by_name(&stream_path[i], save_stream_cnt[i], &stream)
+                        {
                             return Err(-1);
                         };
+                    } else {
+                        if let Some(ref mut file) = stream_fd[i] {
+                            if let Err(ret) = save_stream(file, &stream) {
+                                return Err(-1);
+                            };
+                        }
                     }
 
                     unsafe {
@@ -1537,7 +1494,7 @@ pub fn sample_get_video_stream_byfd() -> Result<(), i32> {
             };
             unsafe {
                 IMP_Encoder_StopRecvPic(chn_num);
-                close(stream_fd[i]);
+                stream_fd[i].take();
             }
         }
     }

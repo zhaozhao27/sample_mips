@@ -1,0 +1,23 @@
+[package]
+name = "rfl"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[lib]
+name = "rfl"  # 指定二进制文件的名称
+path = "lib.rs"   # 指定入口文件的路径
+
+[build-dependencies]
+bindgen = "0.70.1"
+walkdir = "2.3"
+regex = "1.11.0"
+
+[dependencies]
+libc = "0.2.161"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(CONFIG_PRINTK)"] }
+
+
+

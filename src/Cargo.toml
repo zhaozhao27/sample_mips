@@ -1,0 +1,50 @@
+[package]
+name = "sample_mips"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[[bin]]
+name = "sample_mips"  # 指定二进制文件的名称
+path = "main.rs"   # 指定入口文件的路径
+
+[profile.release]
+#panic = "abort"
+lto = true
+[profile.dev]
+#panic = "abort"
+
+[profile.minsize]
+inherits = "release"
+strip = true
+lto = true
+opt-level = "z"
+#panic = "abort"
+
+[build-dependencies]
+bindgen = "0.70.1"
+walkdir = "2.3"
+regex = "1.11.0"
+
+[dependencies]
+#rfl ={ path = "../rfl"}
+panic-abort = { version = "0.3.2",optional = false }
+libc = { version = "0.2.161", default-features = false }
+spin="0.9.8"
+libc-print = "0.1.23"
+libc_alloc = "1.0.7"
+log = "0.4.22"
+env_logger="0.11.5"
+nix={version = "0.29.0",features = ["poll","pthread"]}
+
+
+[features]
+std=[]#是否启用std库，默认支持，取消特性后需要使用 RUSTFLAGS="-Cpanic=abort" cargo build -Zbuild-std=core,alloc --release 进行编译
+SUPPORT_RGB555LE = []
+SHOW_FRM_BITRATE = []
+SENSOR_GC2053 = []
+SENSOR_GC2063 = []
+#default = ["panic-abort","SENSOR_GC2053"] 
+default = ["std","SENSOR_GC2053"] 
+
+

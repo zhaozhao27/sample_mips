@@ -1,54 +1,12 @@
-[package]
-name = "sample_mips"
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
-build = "build.rs"
+license = "GPL-2.0"
+authors = ["lzzhang"]
 
-[[bin]]
-name = "sample_mips"  # 指定二进制文件的名称
-path = "src/main.rs"   # 指定入口文件的路径
+[workspace] 
+resolver = "2"
+members = [ "src"] 
 
-# [lib]
-# crate-type = ["staticlib"]
-
-[target.mipsel-unknown-linux-uclibc.profile.release]
-panic = "abort"
-
-[target.mipsel-unknown-linux-uclibc.profile.dev]
-panic = "abort"
-
-
-[profile.release]
-panic = "abort"
-lto = true
-[profile.dev]
-panic = "abort"
-
-
-[build-dependencies]
-bindgen = "0.70.1"
-walkdir = "2.3"
-regex = "1.11.0"
-
-# [dependencies]
-# panic-abort = { version = "0.3.2",optional = true }
-# libc = "0.2.161"
-# alloc-no-stdlib = "2.0.4"
-# num = { version = "0.4.2",default-features = false }
-
-[features]
-SUPPORT_RGB555LE = []
-SHOW_FRM_BITRATE = []
-SENSOR_GC2053 = []
-SENSOR_GC2063 = []
-default = ["panic-abort","SENSOR_GC2053"] 
-# default = ["SENSOR_GC2053"] 
-
-
-
-[target.mipsel-unknown-linux-uclibc.dependencies]
-panic-abort = { version = "0.3.2",optional = true }
+[workspace.dependencies]
 libc = "0.2.161"
-alloc-no-stdlib = "2.0.4"
-
-

@@ -38,15 +38,17 @@ use core::ptr::copy_nonoverlapping;
 use core::ptr::null_mut;
 use core::slice::from_raw_parts;
 
+use crate::common::CHN;
+use alloc::string::String;
+use alloc::vec::Vec;
 use libc::malloc;
 use libc::sleep;
 use libc::{c_void, free, localtime, printf, strftime, time, time_t, tm};
 use libc::{pthread_cancel, pthread_create, pthread_join};
-const TAG: &str = "Sample-OSD";
-use crate::common::CHN;
 
 const OSD_LETTER_NUM: u32 = 20;
 const GRP_NUM: i32 = 0;
+const TAG: &str = "OSD";
 
 fn osd_show(pr_hander: &mut [IMPRgnHandle]) -> i32 {
     let mut ret: i32;
@@ -82,10 +84,10 @@ pub extern "C" fn update_thread(p: *mut c_void) -> *mut c_void {
 
     ret = osd_show(&mut pr_hander);
 
-    imp_log_info!("osd_show called");
+    imp_log_info!(&TAG, "osd_show called");
 
     if ret < 0 {
-        imp_log_err!("osd_show failed\n");
+        imp_log_err!(&TAG, "osd_show failed\n");
         return ptr::null::<c_void>() as *mut _;
     }
     loop {
@@ -201,7 +203,8 @@ pub fn sample_osd_start() -> Result<(), i32> {
     }
 
     /* Step.4 OSD init */
-    pr_hander = sample_osd_init(GRP_NUM).unwrap();
+    let handlers = sample_osd_init(GRP_NUM).unwrap();
+
     // Step 5: Bind
     let mut osd_cell = IMPCell {
         deviceID: crate::bindings::IMPDeviceID::DEV_ID_OSD,
@@ -232,14 +235,14 @@ pub fn sample_osd_start() -> Result<(), i32> {
     };
 
     if time_stamp_data.is_null() {
-        imp_log_err!("valloc timeStampData error\n\0");
+        imp_log_err!(&TAG, "valloc timeStampData error\n\0");
         return Err(-1);
     }
 
     let mut tid: u32 = 0;
     let ret = unsafe { pthread_create(&mut tid, ptr::null(), update_thread, time_stamp_data) };
     if ret != 0 {
-        imp_log_err!("thread create error");
+        imp_log_err!(&TAG, "thread create error");
         return Err(-1);
     }
 
@@ -273,9 +276,8 @@ pub fn sample_osd_start() -> Result<(), i32> {
     ret_verify!(ret, "UnBind FrameSource and OSD failed\n");
 
     // Step c: OSD exit
-    unsafe {
-        sample_osd_exit(pr_hander, GRP_NUM).unwrap();
-    }
+
+    sample_osd_exit(handlers, GRP_NUM).unwrap();
 
     // Step d: Encoder exit
     sample_encoder_exit().unwrap();
@@ -292,7 +294,6 @@ pub fn sample_osd_start() -> Result<(), i32> {
 
     // Step f: System exit
     sample_system_exit(&mut sensor_info).unwrap();
-
-    imp_log_info!("exit !");
+    imp_log_info!(&TAG, "exit !");
     Ok(())
 }
